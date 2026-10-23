@@ -10,6 +10,7 @@ import subprocess
 import ctypes
 from ctypes import wintypes
 import time
+import urllib.request, urllib.parse, queue, io
 from pathlib import Path
 import tkinter
 from tkinter import messagebox, filedialog
@@ -52,7 +53,14 @@ def main():
     home.mkdir(parents=True, exist_ok=True)
     runtime = home/'runtime'
     seed = Path(getattr(sys, '_MEIPASS', Path(__file__).parent))/'app_seed'
-    if not runtime.exists():
+    bundled=seed.parent/'initial_data'
+    if bundled.exists():
+        for item in bundled.iterdir():
+            destination=home/item.name
+            if not destination.exists():
+                if item.is_dir():shutil.copytree(item,destination)
+                else:shutil.copy2(item,destination)
+    if not runtime.exists() or tuple(map(int,validate(runtime)['version'].split('.')))<tuple(map(int,validate(seed)['version'].split('.'))):
         promote(home, seed)
     pending = home/'pending_update'
     if (pending/'version.json').exists():
