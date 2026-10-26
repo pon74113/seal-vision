@@ -1,3 +1,12 @@
+Seal Vision 1.7.1 — live-test input fixes
+
+- Send real absolute mouse movement for Moonlight/SDL hover handling and include keyboard scan codes.
+- Correct chat click position; use Enter on the retry path and require visible /elim before submission.
+- Make calibration window selectable and account for its frame offset, including fullscreen game-area selection.
+- Bound text OCR detector size and retain results until consumed; add inference diagnostics.
+- Five category labels were successfully taught from the live Moonlight inventory in the local test. They remain private local settings.
+- Live selling has NOT completed: the test stopped before selling because chat command entry/recognition was not confirmed. No items were sold during that test. Continue with chat focus setup before relying on automated navigation or selling.
+
 Seal Vision 1.7 supports Moonlight instead of requiring AnyDesk.
 
 - Existing users: click Check for updates, then Update now. The original EXE and SHA-256 manifest validation remain compatible.

@@ -64,7 +64,7 @@ def recognize_ap(engine,rgb):
     valid=[value for value,count in votes.items() if count>=2]
     return valid[0] if len(valid)==1 else None
 
-VERSION='1.7'
+VERSION='1.7.1'
 def stage_update(blob,home=ROOT):
     if len(blob)>5_000_000:raise ValueError('ไฟล์อัปเดตใหญ่เกินกำหนด')
     with zipfile.ZipFile(io.BytesIO(blob)) as z:
@@ -462,21 +462,25 @@ class TextReader:
     """Independent OCR queue; never block the UI or F9 on model inference."""
     def __init__(self):
         self.request=None;self.result=None;self.ready=False;self.error='';self.closed=False
+        self.trace={'phase':'loading'}
         self.event=threading.Event();threading.Thread(target=self.work,daemon=True).start()
     def work(self):
         try:
             from rapidocr_onnxruntime import RapidOCR
-            engine=RapidOCR(intra_op_num_threads=1,inter_op_num_threads=1)
+            engine=RapidOCR(intra_op_num_threads=1,inter_op_num_threads=1,det_limit_type='max',det_limit_side_len=1280)
             self.ready=True
+            self.trace={'phase':'idle'}
             while not self.closed:
                 self.event.wait(.2);self.event.clear()
                 job=self.request;self.request=None
                 if job is None:continue
                 token,image=job
+                started=time.monotonic();self.trace={'phase':'running','token':token,'shape':list(image.shape)}
                 try:
                     lines,_=engine(cv2.cvtColor(image,cv2.COLOR_RGB2BGR))
                     self.result=(token,time.monotonic(),lines or [])
                 except Exception as error:self.error=str(error);self.result=(token,time.monotonic(),[])
+                self.trace={'phase':'idle','token':token,'elapsed':time.monotonic()-started,'lines':len(self.result[2]),'error':self.error}
         except Exception as error:self.error=str(error)
     def submit(self,token,image):
         self.request=(token,image.copy());self.event.set()
@@ -512,7 +516,7 @@ class MoonlightApp(App):
         super().__init__()
         # Retain update controls, event logging, combat mode and stable EXE.
         for widget in self.root.winfo_children():widget.destroy()
-        self.root.title('Seal Vision 1.7 • Moonlight');self.root.geometry('720x880')
+        self.root.title('Seal Vision '+VERSION+' • Moonlight');self.root.geometry('720x880')
         self.text_reader=TextReader();self.sale_vision=SaleVision(ROOT)
         self.mode=tk.StringVar(value='ต่อสู้ / เก็บของ');self.teach=tk.StringVar(value=SALE_CATEGORIES[0])
         self.sale=None;self.text_token=0;self.text_at=0;self.text_state=None;self.text_seen=-1
@@ -579,7 +583,8 @@ class MoonlightApp(App):
             x,y,w,h=self.client_rect()
             if kind=='ap':
                 a,b,c,d=self.view_roi;x+=round(a*w);y+=round(b*h);w=round((c-a)*w);h=round((d-b)*h)
-            top=tk.Toplevel(self.root);top.overrideredirect(True);top.attributes('-topmost',True);top.attributes('-alpha',.35)
+            top=tk.Toplevel(self.root);top.title('Seal Vision • เลือกกรอบ '+kind);top.attributes('-topmost',True);top.attributes('-alpha',.35)
+            if kind=='view':top.attributes('-fullscreen',True)
             top.geometry(f'{w}x{h}{x:+d}{y:+d}');canvas=tk.Canvas(top,bg='black',highlightthickness=0);canvas.pack(fill='both',expand=True)
             canvas.create_text(w//2,35,text='ลากกรอบภาพเกม' if kind=='view' else 'ลากเฉพาะตัวเลข AP',fill='yellow',font=('Segoe UI',20))
             drag={}
@@ -590,7 +595,8 @@ class MoonlightApp(App):
                 if 'start' not in drag:return
                 sx,sy=drag['start'];a,c=sorted((sx,e.x));b,d=sorted((sy,e.y))
                 if c-a<20 or d-b<8:return
-                value=(a/w,b/h,c/w,d/h)
+                offset_x=canvas.winfo_rootx()-x;offset_y=canvas.winfo_rooty()-y
+                value=(max(0,(a+offset_x)/w),max(0,(b+offset_y)/h),min(1,(c+offset_x)/w),min(1,(d+offset_y)/h))
                 if kind=='view':self.view_roi=value
                 else:self.ap_roi=value
                 (ROOT/'moonlight_view.json').write_text(json.dumps({'view':self.view_roi,'ap':self.ap_roi}),encoding='utf-8')
@@ -623,15 +629,27 @@ class MoonlightApp(App):
         if not self.allowed():return False
         x,y,w,h=self.game_rect;px,py=map(round,p)
         if not (0<=px<w and 0<=py<h):return False
-        u.SetCursorPos(x+px,y+py)
+        # SDL's input path does not reliably forward SetCursorPos-only moves.
+        # Inject a real absolute movement so hovering also reaches Sunshine.
+        vx,vy=u.GetSystemMetrics(76),u.GetSystemMetrics(77)
+        vw,vh=u.GetSystemMetrics(78),u.GetSystemMetrics(79)
+        u.mouse_event(0xC001,round((x+px-vx)*65535/max(1,vw-1)),round((y+py-vy)*65535/max(1,vh-1)),0,0)
         if not move:
             down,up=(8,16) if right else (2,4)
             u.mouse_event(down,0,0,0,0);u.mouse_event(up,0,0,0,0)
         return True
 
+    def key(self,code,now):
+        if not self.allowed():return False
+        scan=u.MapVirtualKeyW(code,0)
+        u.keybd_event(code,scan,0,0);time.sleep(.07);u.keybd_event(code,scan,2,0)
+        self.event('key',code=code,ap=self.ap)
+        return True
+
     def transition(self,state):
         self.sale['state']=state;self.sale['since']=time.monotonic();self.sale['hits']=0
         self.text_reader.result=None;self.text_state=None
+        self.event('sale_state',state=state)
 
     def fail_sale(self,reason):
         sold=self.sale['sold'];self.stop();self.sale=None
@@ -640,7 +658,7 @@ class MoonlightApp(App):
     def ocr(self,image,state):
         now=time.monotonic();result=self.text_reader.result
         lines=None
-        if result and result[0]==self.text_token and self.text_state==state and now-result[1]<3 and self.text_seen!=result[0]:
+        if result and result[0]==self.text_token and self.text_state==state and self.text_seen!=result[0]:
             lines=result[2];self.text_seen=result[0]
         if (result is not None or self.text_state!=state) and now-self.text_at>.8:
             self.text_token+=1;self.text_at=now;self.text_state=state;self.text_reader.result=None
@@ -689,13 +707,17 @@ class MoonlightApp(App):
             elif elapsed>4:self.fail_sale('ไม่พบ HUD ของ Seal ตรวจกรอบภาพเกมและเปิดสตรีม')
             return
         if state=='chat':
-            self.click_game((w*.13,h*.985));self.transition('type');return
+            self.click_game((w*.13,h*.994))
+            if s['attempt']:
+                self.key(13,now)
+            self.transition('type');return
         if state=='type' and elapsed>.5:
             for code in (0xBF,ord('E'),ord('L'),ord('I'),ord('M')):
                 if not self.key(code,now):self.fail_sale('หน้าต่างเปลี่ยนขณะพิมพ์');return
             self.transition('verify_command');return
         if state=='verify_command':
             lines=self.ocr(image[int(h*.96):,:int(w*.35)],state)
+            if self.text_reader.error:self.fail_sale('OCR: '+self.text_reader.error);return
             if lines is None:return
             text=' '.join(str(v[1]).lower().replace(' ','') for v in lines if v[2]>=.75)
             if '/elim' in text:
@@ -771,7 +793,7 @@ class MoonlightApp(App):
             label=self.sale_vision.tooltip(image,s['point']);category=self.sale_vision.category(label)
             if category:
                 s['category']=category;s['label']=label;self.transition('verify_item')
-            elif elapsed>.7:s['slot']+=1;s['skipped']+=1;self.transition('scan')
+            elif elapsed>1.5:s['slot']+=1;s['skipped']+=1;self.transition('scan')
             return
         if state=='verify_item' and elapsed>.12:
             label=self.sale_vision.tooltip(image,s['point'])
@@ -864,11 +886,18 @@ class MoonlightApp(App):
 if __name__=='__main__':
     app=MoonlightApp()
     if os.environ.get('SEAL_VISION_DIAGNOSTIC')=='1':
+        app.root.withdraw()
+        def sample_ocr():
+            sample=np.zeros((100,700,3),np.uint8)
+            cv2.putText(sample,'/elim',(20,65),cv2.FONT_HERSHEY_SIMPLEX,1.5,(255,255,255),2)
+            app.text_reader.submit(-1,sample)
+        app.root.after(4000,sample_ocr)
         def diagnostic():
             report={'version':VERSION,'ap_reader_ready':app.reader.ready,'ap_reader_error':app.reader.error,
-                    'text_reader_ready':app.text_reader.ready,'text_reader_error':app.text_reader.error,
+                    'text_reader_ready':app.text_reader.ready,'text_reader_error':app.text_reader.error,'ocr_trace':app.text_reader.trace,
+                    'ocr_result':app.text_reader.result,
                     'controls':[w.cget('text') for w in app.root.winfo_children() if isinstance(w,tk.Button)]}
             (ROOT/'diagnostic.json').write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')
             app.close()
-        app.root.after(8000,diagnostic)
+        app.root.after(15000,diagnostic)
     app.root.mainloop()
