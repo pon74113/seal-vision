@@ -1,0 +1,26 @@
+name: Publish verified runtime update
+on:
+  push:
+    branches: [main]
+    paths: [release-version.txt]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Compile and build the legacy-compatible update
+        run: python build_update.py
+      - name: Publish update with GitHub SHA-256 asset metadata
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          VERSION=$(cat release-version.txt | tr -d '\r\n')
+          test -f "dist/SealVision-update-${VERSION}.zip"
+          gh release create "v${VERSION}" "dist/SealVision-update-${VERSION}.zip" --target "$GITHUB_SHA" --title "Seal Vision ${VERSION} — Moonlight และขายไอเทม" --notes-file RELEASE_NOTES.md --latest

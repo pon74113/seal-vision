@@ -23,6 +23,9 @@ u.GetWindowRect.argtypes=[wintypes.HWND,ctypes.POINTER(wintypes.RECT)]
 u.SetCursorPos.argtypes=[ctypes.c_int,ctypes.c_int]
 u.ShowWindow.argtypes=[wintypes.HWND,ctypes.c_int]
 u.SetForegroundWindow.argtypes=[wintypes.HWND]
+u.GetClientRect.argtypes=[wintypes.HWND,ctypes.POINTER(wintypes.RECT)]
+u.ClientToScreen.argtypes=[wintypes.HWND,ctypes.POINTER(wintypes.POINT)]
+u.GetWindowThreadProcessId.argtypes=[wintypes.HWND,ctypes.POINTER(wintypes.DWORD)]
 
 def find_anydesk():
     found=[]
@@ -61,7 +64,7 @@ def recognize_ap(engine,rgb):
     valid=[value for value,count in votes.items() if count>=2]
     return valid[0] if len(valid)==1 else None
 
-VERSION='1.6'
+VERSION='1.7'
 def stage_update(blob,home=ROOT):
     if len(blob)>5_000_000:raise ValueError('ไฟล์อัปเดตใหญ่เกินกำหนด')
     with zipfile.ZipFile(io.BytesIO(blob)) as z:
@@ -345,7 +348,7 @@ class App:
             except Exception as ex:
                 self.stop();self.status.set('หยุดเพราะตรวจภาพไม่ได้: '+str(ex));self.event('error',message=str(ex))
         elif not self.reader.ready:self.ap_status.set(self.reader.error)
-        self.root.after(250,self.tick)
+        self.root.after(120,self.tick)
     def step(self):
         now=time.monotonic()
         if not self.allowed():self.status.set('พัก: AnyDesk ต้องอยู่ด้านหน้าและเต็มจอขนาดเดิม');return
@@ -452,4 +455,420 @@ class App:
     def close(self):
         self.running=False;self.arming=False;self.reader.closed=True;self.reader.event.set();self.root.destroy()
 
-if __name__=='__main__':App().root.mainloop()
+from vision_tracker import SaleVision, SALE_CATEGORIES, label_similarity
+
+
+class TextReader:
+    """Independent OCR queue; never block the UI or F9 on model inference."""
+    def __init__(self):
+        self.request=None;self.result=None;self.ready=False;self.error='';self.closed=False
+        self.event=threading.Event();threading.Thread(target=self.work,daemon=True).start()
+    def work(self):
+        try:
+            from rapidocr_onnxruntime import RapidOCR
+            engine=RapidOCR(intra_op_num_threads=1,inter_op_num_threads=1)
+            self.ready=True
+            while not self.closed:
+                self.event.wait(.2);self.event.clear()
+                job=self.request;self.request=None
+                if job is None:continue
+                token,image=job
+                try:
+                    lines,_=engine(cv2.cvtColor(image,cv2.COLOR_RGB2BGR))
+                    self.result=(token,time.monotonic(),lines or [])
+                except Exception as error:self.error=str(error);self.result=(token,time.monotonic(),[])
+        except Exception as error:self.error=str(error)
+    def submit(self,token,image):
+        self.request=(token,image.copy());self.event.set()
+
+
+def moonlight_window():
+    """Validate process identity as well as the visible window caption."""
+    matches=[]
+    callback=ctypes.WINFUNCTYPE(wintypes.BOOL,wintypes.HWND,wintypes.LPARAM)
+    def inspect(hwnd,param):
+        if not u.IsWindowVisible(hwnd):return True
+        pid=wintypes.DWORD();u.GetWindowThreadProcessId(hwnd,ctypes.byref(pid))
+        kernel=ctypes.windll.kernel32
+        kernel.OpenProcess.restype=wintypes.HANDLE
+        kernel.QueryFullProcessImageNameW.argtypes=[wintypes.HANDLE,wintypes.DWORD,wintypes.LPWSTR,ctypes.POINTER(wintypes.DWORD)]
+        kernel.CloseHandle.argtypes=[wintypes.HANDLE]
+        handle=kernel.OpenProcess(0x1000,False,pid.value)
+        if not handle:return True
+        try:
+            path=ctypes.create_unicode_buffer(32768);size=wintypes.DWORD(len(path))
+            if kernel.QueryFullProcessImageNameW(handle,0,path,ctypes.byref(size)) and Path(path.value).name.lower()=='moonlight.exe':
+                title=ctypes.create_unicode_buffer(1024);u.GetWindowTextW(hwnd,title,1024)
+                rect=wintypes.RECT();u.GetClientRect(hwnd,ctypes.byref(rect))
+                if rect.right>500 and rect.bottom>300:matches.append((rect.right*rect.bottom,hwnd,title.value))
+        finally:kernel.CloseHandle(handle)
+        return True
+    u.EnumWindows(callback(inspect),0)
+    return max(matches) if matches else None
+
+
+class MoonlightApp(App):
+    def __init__(self):
+        super().__init__()
+        # Retain update controls, event logging, combat mode and stable EXE.
+        for widget in self.root.winfo_children():widget.destroy()
+        self.root.title('Seal Vision 1.7 • Moonlight');self.root.geometry('720x880')
+        self.text_reader=TextReader();self.sale_vision=SaleVision(ROOT)
+        self.mode=tk.StringVar(value='ต่อสู้ / เก็บของ');self.teach=tk.StringVar(value=SALE_CATEGORIES[0])
+        self.sale=None;self.text_token=0;self.text_at=0;self.text_state=None;self.text_seen=-1
+        self.view_roi=(0.,0.,1.,1.);self.ap_roi=(.085,.022,.17,.075)
+        try:
+            calibration=json.loads((ROOT/'moonlight_view.json').read_text(encoding='utf-8'))
+            self.view_roi=tuple(calibration['view']);self.ap_roi=tuple(calibration['ap'])
+            if not all(0<=v<=1 for v in self.view_roi+self.ap_roi):raise ValueError()
+        except Exception:self.view_roi=(0.,0.,1.,1.);self.ap_roi=(.085,.022,.17,.075)
+        tk.Label(self.root,text='Seal Vision • Moonlight',font=('Segoe UI',23,'bold')).pack(pady=10)
+        tk.Label(self.root,text='เปิดสตรีมเกม • ตั้งคีย์บอร์ดทั้งสองเครื่องเป็น English • F9 หยุด').pack()
+        tk.Button(self.root,text='เปิด / แสดง Moonlight',command=self.connect_anydesk).pack(pady=5)
+        tk.Button(self.root,text='1. ลากกรอบเฉพาะภาพเกม (ตัดขอบดำ / แถบชื่อ / Taskbar)',command=lambda:self.select_region('view')).pack(fill='x',padx=25)
+        tk.Button(self.root,text='2. ลากกรอบเฉพาะตัวเลข AP เช่น 830 / 1205',command=lambda:self.select_region('ap')).pack(fill='x',padx=25,pady=3)
+        tk.Label(self.root,text='จำหมวดครั้งแรก: เปิด I → ชี้ไอเทมให้ tooltip ขึ้น → กด F6').pack(pady=5)
+        tk.OptionMenu(self.root,self.teach,*SALE_CATEGORIES).pack()
+        tk.Label(self.root,text='เลือกหมวดด้านบนก่อนกด F6 • จำจากข้อความชมพู ไม่ใช่ชื่อหรือรูปไอเทม').pack()
+        self.learned=tk.StringVar();tk.Label(self.root,textvariable=self.learned,wraplength=670).pack();self.update_learned()
+        tk.OptionMenu(self.root,self.mode,'ต่อสู้ / เก็บของ','กลับเมืองและขายของ').pack(pady=6)
+        tk.Checkbutton(self.root,text='โหมดต่อสู้: ทดสอบ 3 รอบแล้วหยุด',variable=self.test).pack()
+        tk.Button(self.root,text='เริ่มโหมดที่เลือก (F8)',command=self.start,bg='#b8e1c3',font=('Segoe UI',14,'bold')).pack(fill='x',padx=25,pady=5)
+        tk.Button(self.root,text='ขายไอเทม • /elim แล้วขายจนจบ',command=self.start_sale,bg='#ffe0a6',font=('Segoe UI',14,'bold')).pack(fill='x',padx=25,pady=4)
+        tk.Button(self.root,text='หยุดทันที (F9)',command=self.stop,font=('Segoe UI',13)).pack(fill='x',padx=25)
+        tk.Label(self.root,text='ขาย: /elim → หา Street Merchant → แลกเปลี่ยน → ตรวจหมวด → คลิกขวา → O',wraplength=670).pack(pady=6)
+        tk.Label(self.root,text='ขายแล้วหยุด ไม่เดินกลับจุดล่า • ไม่พบภาพที่ยืนยันได้จะหยุด • ไม่มีการกด X อัตโนมัติ',wraplength=670).pack()
+        tk.Label(self.root,textvariable=self.status,wraplength=670,fg='#006e87').pack(pady=9)
+        tk.Label(self.root,textvariable=self.ap_status).pack();tk.Label(self.root,textvariable=self.round_status).pack()
+        self.update_button=tk.Button(self.root,text='ตรวจหาอัปเดต',command=self.online_update)
+        self.update_button.pack(fill='x',padx=25,pady=8)
+        tk.Button(self.root,text='อัปเดตจากไฟล์ ZIP',command=self.install_update).pack()
+        tk.Label(self.root,text='รุ่น '+VERSION).pack()
+        self.status.set('พร้อมตั้งกรอบภาพ Moonlight และจำข้อความหมวดด้วย F6')
+
+    def update_learned(self):
+        self.learned.set('จำแล้ว: '+(' / '.join(k for k in SALE_CATEGORIES if k in self.sale_vision.labels) or 'ยังไม่มี'))
+
+    def start_sale(self):
+        self.stop();self.mode.set('กลับเมืองและขายของ');self.start()
+
+    def connect_anydesk(self):
+        found=moonlight_window()
+        if found:u.ShowWindow(found[1],9);u.SetForegroundWindow(found[1]);return
+        path=Path(os.environ.get('ProgramFiles','C:/Program Files'))/'Moonlight Game Streaming/Moonlight.exe'
+        if path.exists():subprocess.Popen([str(path)])
+        else:self.status.set('ไม่พบ Moonlight กรุณาเปิดเองก่อน')
+
+    def client_rect(self):
+        rect=wintypes.RECT();point=wintypes.POINT(0,0)
+        u.GetClientRect(self.target_hwnd,ctypes.byref(rect));u.ClientToScreen(self.target_hwnd,ctypes.byref(point))
+        return point.x,point.y,rect.right,rect.bottom
+
+    def capture(self):
+        x,y,w,h=self.client_rect();a,b,c,d=self.view_roi
+        self.game_rect=(x+round(a*w),y+round(b*h),round((c-a)*w),round((d-b)*h))
+        x,y,w,h=self.game_rect
+        if w<400 or h<250:raise ValueError('กรอบภาพเกมเล็กเกินไป กรุณาตั้งใหม่')
+        return np.asarray(ImageGrab.grab(bbox=(x,y,x+w,y+h)))
+
+    def select_region(self,kind):
+        self.stop();found=moonlight_window()
+        if not found:self.status.set('เปิด Moonlight และเชื่อมเกมก่อน');return
+        self.target_hwnd=found[1];self.root.iconify();u.SetForegroundWindow(found[1])
+        def overlay():
+            x,y,w,h=self.client_rect()
+            if kind=='ap':
+                a,b,c,d=self.view_roi;x+=round(a*w);y+=round(b*h);w=round((c-a)*w);h=round((d-b)*h)
+            top=tk.Toplevel(self.root);top.overrideredirect(True);top.attributes('-topmost',True);top.attributes('-alpha',.35)
+            top.geometry(f'{w}x{h}{x:+d}{y:+d}');canvas=tk.Canvas(top,bg='black',highlightthickness=0);canvas.pack(fill='both',expand=True)
+            canvas.create_text(w//2,35,text='ลากกรอบภาพเกม' if kind=='view' else 'ลากเฉพาะตัวเลข AP',fill='yellow',font=('Segoe UI',20))
+            drag={}
+            def down(e):drag['start']=(e.x,e.y);drag['rect']=canvas.create_rectangle(e.x,e.y,e.x,e.y,outline='red',width=4)
+            def move(e):
+                if 'rect' in drag:canvas.coords(drag['rect'],*drag['start'],e.x,e.y)
+            def done(e):
+                if 'start' not in drag:return
+                sx,sy=drag['start'];a,c=sorted((sx,e.x));b,d=sorted((sy,e.y))
+                if c-a<20 or d-b<8:return
+                value=(a/w,b/h,c/w,d/h)
+                if kind=='view':self.view_roi=value
+                else:self.ap_roi=value
+                (ROOT/'moonlight_view.json').write_text(json.dumps({'view':self.view_roi,'ap':self.ap_roi}),encoding='utf-8')
+                top.destroy();self.root.deiconify();self.status.set('บันทึกกรอบภาพแล้ว')
+            canvas.bind('<ButtonPress-1>',down);canvas.bind('<B1-Motion>',move);canvas.bind('<ButtonRelease-1>',done)
+            top.bind('<Escape>',lambda e:(top.destroy(),self.root.deiconify()))
+        self.root.after(500,overlay)
+
+    def start(self):
+        if self.running or self.arming:return
+        found=moonlight_window()
+        if not found:self.status.set('ไม่พบ Moonlight ที่เปิดอยู่');return
+        if self.mode.get()=='กลับเมืองและขายของ':
+            if len(self.sale_vision.labels)!=len(SALE_CATEGORIES):self.status.set('จำหมวดทั้ง 5 ด้วย F6 ก่อนเริ่มขาย เพื่อไม่ตีความจากสีเพียงอย่างเดียว');return
+            if not self.text_reader.ready:self.status.set('กำลังเตรียม OCR: '+self.text_reader.error);return
+        elif not self.reader.ready or self.bag is None:self.status.set(self.reader.error or 'ยังไม่พร้อมอ่าน AP / ไม่พบ bag.png');return
+        self.reset();self.target_hwnd=found[1];self.running=True;self.bound=found[2];self.monitor=False
+        self.sale=None
+        if self.mode.get()=='กลับเมืองและขายของ':
+            self.sale={'state':'validate_game','since':time.monotonic(),'started':time.monotonic(),'walks':0,'slot':0,'sold':0,'skipped':0,'attempt':0}
+        self.root.iconify();u.ShowWindow(self.target_hwnd,9);u.SetForegroundWindow(self.target_hwnd)
+        self.status.set('เริ่มแล้ว • F9 หยุด')
+
+    def allowed(self):
+        if not self.running or u.GetForegroundWindow()!=getattr(self,'target_hwnd',None):return False
+        x,y,w,h=self.client_rect()
+        return w>400 and h>250 and not u.IsIconic(self.target_hwnd)
+
+    def click_game(self,p,right=False,move=False):
+        if not self.allowed():return False
+        x,y,w,h=self.game_rect;px,py=map(round,p)
+        if not (0<=px<w and 0<=py<h):return False
+        u.SetCursorPos(x+px,y+py)
+        if not move:
+            down,up=(8,16) if right else (2,4)
+            u.mouse_event(down,0,0,0,0);u.mouse_event(up,0,0,0,0)
+        return True
+
+    def transition(self,state):
+        self.sale['state']=state;self.sale['since']=time.monotonic();self.sale['hits']=0
+        self.text_reader.result=None;self.text_state=None
+
+    def fail_sale(self,reason):
+        sold=self.sale['sold'];self.stop();self.sale=None
+        self.status.set(f'หยุดขาย: {reason} • ขายแล้ว {sold} ชิ้น')
+
+    def ocr(self,image,state):
+        now=time.monotonic();result=self.text_reader.result
+        lines=None
+        if result and result[0]==self.text_token and self.text_state==state and now-result[1]<3 and self.text_seen!=result[0]:
+            lines=result[2];self.text_seen=result[0]
+        if (result is not None or self.text_state!=state) and now-self.text_at>.8:
+            self.text_token+=1;self.text_at=now;self.text_state=state;self.text_reader.result=None
+            self.text_reader.submit(self.text_token,image)
+        return lines
+
+    def teach_label(self):
+        if self.running:self.status.set('หยุด F9 ก่อนจำหมวด');return
+        found=moonlight_window()
+        if not found or u.GetForegroundWindow()!=found[1]:self.status.set('ชี้ไอเทมใน Moonlight ให้ tooltip ขึ้น แล้วกด F6');return
+        self.target_hwnd=found[1];image=self.capture();point=wintypes.POINT();u.GetCursorPos(ctypes.byref(point))
+        slot=(point.x-self.game_rect[0],point.y-self.game_rect[1]);grid=self.sale_vision.grid(image)
+        if not grid or min(np.hypot(slot[0]-p[0],slot[1]-p[1]) for p in grid)>25:self.status.set('ชี้ช่องไอเทมในกระเป๋าก่อนกด F6');return
+        try:self.sale_vision.learn(self.teach.get(),self.sale_vision.tooltip(image,slot));self.update_learned();self.status.set('จำหมวด '+self.teach.get()+' แล้ว')
+        except Exception as error:self.status.set(str(error))
+
+    def tick(self):
+        # App.tick supplies update handling and F8/F9; add F6 edge detection.
+        if hasattr(self,'sale_vision'):
+            value=u.GetAsyncKeyState(0x75);held=bool(value&0x8000)
+            if (value&1) or (held and not self.hotkeys.get(0x75)):self.teach_label()
+            self.hotkeys[0x75]=held
+        super().tick()
+
+    def step(self):
+        if not self.allowed():
+            if self.sale:self.fail_sale('Moonlight ไม่อยู่ด้านหน้า กดเริ่มใหม่เมื่อพร้อม')
+            else:self.status.set('พัก: เปิดภาพเกม Moonlight ด้านหน้า')
+            return
+        image=self.capture()
+        if self.sale:
+            previous=self.sale.setdefault('image_shape',image.shape)
+            if previous!=image.shape:self.fail_sale('ขนาดภาพเปลี่ยน เริ่มใหม่หลังตั้งกรอบ');return
+        if self.sale:self.sale_step(image);return
+        # Preserve combat state machine, using game-relative capture and an AP
+        # crop learned for this stream rather than AnyDesk's old screen layout.
+        self.combat_step(image)
+
+    def sale_step(self,image):
+        s=self.sale;now=time.monotonic();state=s['state'];elapsed=now-s['since'];h,w=image.shape[:2]
+        self.status.set(f'ขาย: {state} • ขายแล้ว {s["sold"]} • ข้าม {s["skipped"]} • F9 หยุด')
+        if now-s['started']>600:self.fail_sale('ครบเวลาค้นหา/ขาย 10 นาที');return
+        if elapsed>40:self.fail_sale('รอภาพยืนยันขั้นตอน '+state+' เกินเวลา');return
+        if state=='validate_game':
+            if self.sale_vision.find(image,'hud_ap',.83):self.transition('chat')
+            elif elapsed>4:self.fail_sale('ไม่พบ HUD ของ Seal ตรวจกรอบภาพเกมและเปิดสตรีม')
+            return
+        if state=='chat':
+            self.click_game((w*.13,h*.985));self.transition('type');return
+        if state=='type' and elapsed>.5:
+            for code in (0xBF,ord('E'),ord('L'),ord('I'),ord('M')):
+                if not self.key(code,now):self.fail_sale('หน้าต่างเปลี่ยนขณะพิมพ์');return
+            self.transition('verify_command');return
+        if state=='verify_command':
+            lines=self.ocr(image[int(h*.96):,:int(w*.35)],state)
+            if lines is None:return
+            text=' '.join(str(v[1]).lower().replace(' ','') for v in lines if v[2]>=.75)
+            if '/elim' in text:
+                self.key(13,now);self.transition('warp');return
+            if elapsed>5:
+                # A retry only focuses an empty chat; never submit unverified text.
+                if s['attempt']>=1:self.fail_sale('พิมพ์ /elim ไม่ขึ้น ตรวจภาษา English และช่องแชท');return
+                s['attempt']+=1;self.transition('chat')
+            return
+        if state=='warp' and elapsed>5:
+            self.transition('merchant');return
+        if state=='merchant':
+            lines=self.ocr(image,state)
+            if lines is None:return
+            matches=[line for line in lines if line[2]>=.83 and 'streetmerchant' in re.sub('[^a-z]','',line[1].lower())]
+            if len(matches)==1:
+                s['hits']=s.get('hits',0)+1
+                if s['hits']<2:return
+                box=np.array(matches[0][0]);center=box.mean(axis=0);s['merchant_name']=center.tolist()
+                # Nameplate text must also be green, as in the supplied NPC.
+                x1,y1=box.min(axis=0).astype(int);x2,y2=box.max(axis=0).astype(int)
+                crop=image[max(0,y1):y2+1,max(0,x1):x2+1]
+                if not crop.size or ((crop[:,:,1]>crop[:,:,0]*1.15)&(crop[:,:,1]>crop[:,:,2]*1.1)).mean()<.025:return
+                self.click_game((center[0],center[1]+36*h/1050));self.transition('trade');return
+            if elapsed>3 and s['walks']<60:
+                # Bounded search in the user-specified upper-left direction.
+                # Search is bounded by 60 moves and the overall deadline.
+                if s['walks'] and s['walks']%3==0 and s.get('rotated_at')!=s['walks']:
+                    self.click_game((w*.53,h*.58),move=True)
+                    if not self.allowed():return
+                    u.mouse_event(8,0,0,0,0)
+                    try:u.mouse_event(1,95,0,0,0)
+                    finally:u.mouse_event(16,0,0,0,0)
+                    s['rotated_at']=s['walks'];self.transition('rotate_wait');return
+                point=(w*(.39 if s['walks']%2==0 else .44),h*.39)
+                if self.sale_vision.find(image,'shop') or self.sale_vision.grid(image):
+                    if self.sale_vision.grid(image):self.key(ord('I'),now);self.transition('merchant');return
+                patch=image[int(point[1])-10:int(point[1])+10,int(point[0])-10:int(point[0])+10]
+                hsv=cv2.cvtColor(patch,cv2.COLOR_RGB2HSV)
+                if ((hsv[:,:,0]>10)&(hsv[:,:,0]<40)&(hsv[:,:,1]<170)&(hsv[:,:,2]>80)).mean()<.75:self.fail_sale('พื้นทางค้นหาแม่ค้าไม่ชัดเจน');return
+                self.click_game(point);s['walks']+=1;self.transition('walk_wait');return
+            if elapsed>8 and s['walks']>=60:self.fail_sale('ไม่พบชื่อ Street Merchant หลังค้นหาครบกำหนด')
+            return
+        if state=='rotate_wait' and elapsed>1.5:self.transition('merchant');return
+        if state=='walk_wait' and elapsed>2.5:self.transition('merchant');return
+        if state=='trade':
+            if self.sale_vision.find(image,'shop') and self.sale_vision.grid(image):self.transition('scan');return
+            anchor=self.sale_vision.find(image,'trade',.88)
+            if anchor:
+                s['hits']=s.get('hits',0)+1
+                if s['hits']>=2:self.click_game((anchor['x']+anchor['w']/2,anchor['y']+anchor['h']/2));self.transition('shop')
+            elif elapsed>4:self.transition('merchant')
+            return
+        if state=='shop':
+            if self.sale_vision.find(image,'shop') and self.sale_vision.grid(image):self.transition('scan')
+            elif self.sale_vision.find(image,'shop') and elapsed>1:
+                self.key(ord('I'),now);self.transition('inventory_wait')
+            return
+        if state=='inventory_wait':
+            if self.sale_vision.find(image,'shop') and self.sale_vision.grid(image):self.transition('scan')
+            return
+        if state=='scan':
+            if not self.sale_vision.find(image,'shop'):self.fail_sale('หน้าร้านหายไป');return
+            grid=self.sale_vision.grid(image)
+            if not grid:self.fail_sale('ไม่พบช่องกระเป๋า');return
+            if s['slot']>=len(grid):self.fail_sale('ตรวจครบช่องกระเป๋าแล้ว');return
+            s['point']=grid[s['slot']]
+            px,py=s['point'];icon=image[max(0,py-10):py+10,max(0,px-10):px+10]
+            if icon.size and icon.reshape(-1,3).std(axis=0).max()<7:
+                s['slot']+=1;self.transition('scan');return
+            self.click_game(s['point'],move=True);self.transition('tooltip');return
+        if state=='tooltip' and elapsed>.25:
+            label=self.sale_vision.tooltip(image,s['point']);category=self.sale_vision.category(label)
+            if category:
+                s['category']=category;s['label']=label;self.transition('verify_item')
+            elif elapsed>.7:s['slot']+=1;s['skipped']+=1;self.transition('scan')
+            return
+        if state=='verify_item' and elapsed>.12:
+            label=self.sale_vision.tooltip(image,s['point'])
+            if self.sale_vision.category(label)!=s['category'] or label_similarity(label,s['label'])<.90:
+                self.fail_sale('หมวดไอเทมเปลี่ยนก่อนคลิกขวา');return
+            if not self.sale_vision.find(image,'shop'):self.fail_sale('ไม่พบหน้าร้าน');return
+            px,py=s['point'];s['icon_before']=image[py-10:py+10,px-10:px+10].copy()
+            self.click_game(s['point'],right=True);self.transition('confirm');return
+        if state=='confirm':
+            anchor=self.sale_vision.find(image,'confirm',.90)
+            if not anchor:return
+            # Require the whole supplied sale-dialog style as well as a separate
+            # pair of O/X buttons. Item name is intentionally not matched.
+            ax,ay=anchor['x'],anchor['y'];scale=anchor['scale']
+            crop=image[max(0,round(ay-92*scale)):ay, max(0,round(ax-75*scale)):min(w,round(ax+190*scale))]
+            if crop.size==0:return
+            # White text on a dark translucent panel must be present above O/X.
+            white=(crop.min(axis=2)>155);dark=(crop.max(axis=2)<145)
+            if white.mean()<.012 or dark.mean()<.18:return
+            # Thai sale phrase is matched directly; no OCR/model wait here.
+            dialog=self.sale_vision.find(image,'sale_text',.88)
+            if not dialog:return
+            if abs(dialog['x']-(ax-45*scale))>18*scale or abs(dialog['y']-(ay-72*scale))>18*scale:return
+            s['hits']=s.get('hits',0)+1
+            if s['hits']<2:return
+            s['confirm_anchor']=anchor
+            self.click_game((ax+14*scale,ay+20*scale));self.transition('sold');return
+        if state=='sold':
+            if self.sale_vision.find(image,'confirm',.88):return
+            if not self.sale_vision.find(image,'shop'):self.fail_sale('ร้านปิดหลังยืนยันขาย');return
+            if elapsed>.25:
+                px,py=s['point'];icon=image[py-10:py+10,px-10:px+10]
+                if icon.shape!=s['icon_before'].shape:self.fail_sale('ขนาดภาพเปลี่ยนหลังขาย');return
+                if np.abs(icon.astype(float)-s['icon_before'].astype(float)).mean()<8:
+                    if elapsed>3:self.fail_sale('ไอเทมยังไม่เปลี่ยนหลังยืนยันขาย')
+                    return
+                s['sold']+=1;self.event('sold_category',category=s['category']);self.transition('scan')
+
+    def combat_step(self,image):
+        now=time.monotonic();h,w=image.shape[:2]
+        a,b,c,d=self.ap_roi
+        if now-self.last_submit>.65:
+            self.seq+=1;self.reader.submit(self.seq,image[round(b*h):round(d*h),round(a*w):round(c*w)]);self.last_submit=now
+        result=self.reader.result
+        if result is None or now-result[1]>2 or result[2] is None:
+            self.good_ap=0;self.status.set('รอ AP • ตรวจกรอบ AP ที่ตั้งไว้');return
+        if result[0]!=self.last_ap_seq:
+            self.last_ap_seq=result[0];self.ap=result[2];current,total=self.ap
+            if self.last_max is not None and total!=self.last_max:self.stop();self.status.set('AP สูงสุดเปลี่ยน หยุดตรวจภาพ');return
+            self.last_max=total;self.good_ap+=1;self.low=self.low+1 if current*2<total else 0
+            if self.baseline is not None and current<self.baseline-10:self.combat=True
+        if self.good_ap<2:return
+        current,total=self.ap;self.ap_status.set(f'AP {current}/{total}')
+        small=cv2.resize(image,(96,64))
+        if self.last_frame is None or np.abs(small.astype(float)-self.last_frame.astype(float)).mean()>.8:self.last_change=now
+        self.last_frame=small
+        if now-self.last_change>18:self.stop();self.status.set('ภาพเกมนิ่งเกิน 18 วินาที');return
+        bag=match_red_bag(image[int(h*.3):int(h*.82),int(w*.3):int(w*.7)],self.bag)
+        self.bag_hits=min(3,self.bag_hits+1) if bag>=.82 else 0
+        self.bag_absent=min(4,self.bag_absent+1) if bag<.76 else 0
+        if self.low>=2 and now-self.last.get('mana',0)>3:
+            if self.key(51,now):self.last['mana']=now
+            return
+        if self.bag_hits>=2:
+            self.phase='loot';self.bag_observed=True
+            if now-self.last.get('loot',0)>1:
+                if self.key(32,now):self.last['loot']=now;self.loot_sent=True
+            if now-self.last.setdefault('loot_start',now)>10:self.stop();self.status.set('เก็บถุงไม่สำเร็จ หยุดตรวจภาพ')
+            return
+        if self.phase=='loot':
+            if self.bag_absent<3:return
+            if self.combat and self.bag_observed and self.loot_sent:
+                self.cycles+=1;self.round_status.set(f'ทดสอบครบ {self.cycles}/3 รอบ')
+                if self.test.get() and self.cycles>=3:self.stop();self.status.set('จบการทดสอบ 3 รอบ');return
+            self.phase='seek';self.phase_at=now;self.baseline=None;self.combat=False;self.bag_observed=False;self.loot_sent=False;self.last.pop('loot_start',None)
+        if self.phase=='seek':
+            if self.key(9,now):self.phase='one';self.phase_at=now
+        elif self.phase=='one' and now-self.phase_at>.8:
+            if self.key(49,now):self.phase='two';self.phase_at=now
+        elif self.phase=='two' and now-self.phase_at>.8:
+            self.baseline=current
+            if self.key(50,now):self.phase='wait';self.phase_at=now
+        elif self.phase=='wait' and now-self.phase_at>5:self.phase='seek';self.phase_at=now
+
+    def close(self):
+        if hasattr(self,'text_reader'):self.text_reader.closed=True;self.text_reader.event.set()
+        super().close()
+
+
+if __name__=='__main__':
+    app=MoonlightApp()
+    if os.environ.get('SEAL_VISION_DIAGNOSTIC')=='1':
+        def diagnostic():
+            report={'version':VERSION,'ap_reader_ready':app.reader.ready,'ap_reader_error':app.reader.error,
+                    'text_reader_ready':app.text_reader.ready,'text_reader_error':app.text_reader.error,
+                    'controls':[w.cget('text') for w in app.root.winfo_children() if isinstance(w,tk.Button)]}
+            (ROOT/'diagnostic.json').write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')
+            app.close()
+        app.root.after(8000,diagnostic)
+    app.root.mainloop()

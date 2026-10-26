@@ -1,17 +1,24 @@
-# Seal Vision
+# Seal Vision 1.7 — Moonlight
 
-Download **SealVision.exe** from the latest GitHub release. Windows x64; no separate Python installation required. The executable includes OCR dependencies and a reference bag image. AnyDesk itself must already be installed or downloaded from its official site.
+Windows foreground image helper for Seal through Moonlight. Existing users can update the original stable SealVision.exe through Check for updates, or load SealVision-update-1.7.zip manually. The SHA-256 manifest and launcher_min 1 remain compatible.
+
+## Setup
+
+1. Open a connected Moonlight game stream; use English keyboard layout on both PCs.
+2. Drag a rectangle around the actual game image, excluding black borders, title bars and taskbars. Include the bottom chat input.
+3. For combat, drag a rectangle around only the AP numbers.
+4. For selling, select each pink category in Seal Vision, hover a matching inventory item in Moonlight, then press F6: รองเท้า, ส่วนหัว, ท่อนบน, อาวุธ, ท่อนล่าง. The nearest tooltip is used, excluding the equipped-item comparison. Relearn after stream resolution or game UI scale changes.
 
 ## Controls
-- Connect AnyDesk: sends a normal session request to the locally saved address. Remote acceptance is still required where configured.
-- Start F8: foreground image recognition, Tab targeting, keys 1/2 skills, key 3 when AP is below 50%, Space for red bags.
-- Stop F9: stops gameplay and automatic dialog handling.
-- Check for updates: downloads a release ZIP, verifies GitHub SHA-256 and the package manifest, then restarts the same launcher.
 
-## Automatic dialog handling (1.6)
-After Connect or Start, a foreground AnyDesk window is checked for the supplied Session Closed dialog and the Global Settings title bar. The program can press Retry (30-second cooldown) or minimize Global Settings (5-second cooldown), after two matching observations. Gameplay pauses while these dialogs are present and waits for confirmed AP readings to resume. Other windows are not minimized. This does not change authentication, security settings, permissions or licensing.
+- F8 starts the selected mode. Combat retains Tab targeting, 1/2 skills, 3 below 50% AP, Space for red bags, and the optional three-cycle test.
+- ขายไอเทม starts the complete sale sequence: focus bottom chat, type and verify /elim, Enter, locate the green Street Merchant name, open Trade, scan inventory, match a learned pink category, right-click, verify the sale phrase and O/X layout, then click O. Item names may vary. X is never clicked automatically.
+- Merchant search alternates small upper-left ground clicks with right-drag camera turns. It stops after 60 moves or 10 minutes. This is bounded visual search, not general map learning or obstacle-aware navigation.
+- F9 stops. Focus loss stops selling. Unknown tooltips are skipped. Missing shop/confirmation evidence stops the sequence.
+- Only the first unlocked inventory page is scanned: 8 columns by 5 rows. Tabs 2/3 and scrolling are not scanned. The program stops after selling; it does not return to a hunting location.
 
-This is a foreground helper. Keep the reference AnyDesk layout visible. Background operation is not supported. Recognition has been checked on supplied fixtures at multiple scales; live behavior depends on the displayed layout.
+## Validation and updates
 
-## Release packaging
-The stable launcher loads locally installed runtime modules. A runtime update ZIP contains seal_app.py, vision_tracker.py and version.json (product SealVision, version, launcher_min 1, sha256 for both modules). A matching vVERSION release contains SealVision-update-VERSION.zip and optionally the complete EXE. User settings, connection addresses, screen captures and play logs are excluded from this repository.
+Visual anchors and controller behavior were tested locally against supplied screenshots, including unknown-category and missing-confirmation rejection. Live Moonlight navigation and selling have not been verified. Inspect live recognition before using valuable inventory.
+
+Run python build_update.py for the three-file runtime ZIP. A change to release-version.txt on main triggers the release workflow. User labels, calibration, addresses, accounts, logs and full screenshots are excluded from releases.
