@@ -1,22 +1,16 @@
-Seal Vision 1.7.1 — live-test input fixes
+Seal Vision 1.7.3 — Moonlight input and NPC menu exit
 
-- Send real absolute mouse movement for Moonlight/SDL hover handling and include keyboard scan codes.
-- Correct chat click position; use Enter on the retry path and require visible /elim before submission.
-- Make calibration window selectable and account for its frame offset, including fullscreen game-area selection.
-- Bound text OCR detector size and retain results until consumed; add inference diagnostics.
-- Five category labels were successfully taught from the live Moonlight inventory in the local test. They remain private local settings.
-- Live selling has NOT completed: the test stopped before selling because chat command entry/recognition was not confirmed. No items were sold during that test. Continue with chat focus setup before relying on automated navigation or selling.
+- Before /elim, detect the Trade menu and its adjacent white Power/Exit button. Require two matching frames, click Exit, and wait for the NPC menu to disappear before focusing chat. This does not click the sale dialog X.
+- Click the bottom chat input, use Enter if the caret is absent, clear retained text, verify an empty input, then type and visually verify one complete /elim before Enter.
+- Send Windows keyboard input with virtual keys and scan codes. Allow 100 ms for mouse movement delivery and hold clicks for 180 ms so the streamed game receives them.
+- Match the green Street Merchant nameplate, read isolated green text rows as a fallback, and search with bounded camera turns and pavement clicks. F7 learns a cropped nameplate from the current stream when a sample differs. Settings stay on the local PC.
+- Keep the Sell Items button, five learned pink categories, first inventory page scan, right-click sale and verified O confirmation. F6 teaches categories. F9 stops. Unknown categories are skipped; missing visual evidence stops the sequence.
+- Preserve the stable EXE and three-file SHA-256 validated runtime ZIP. Existing users can use Check for updates / Update now, or install the ZIP.
 
-Seal Vision 1.7 supports Moonlight instead of requiring AnyDesk.
+Validation: supplied NPC menu image matches Trade at 0.94 and Exit at 1.00. Controller tests verify two-frame Exit detection, adjacency, menu disappearance before chat, no click on sale confirmation during menu closing, allowed-category checks, O-only confirmation, command verification, unknown-item skip and scan completion. Runtime ZIP syntax and manifest checks pass.
 
-- Existing users: click Check for updates, then Update now. The original EXE and SHA-256 manifest validation remain compatible.
-- Set the game image rectangle (exclude black borders, title bars and taskbars), then set the AP-number rectangle for combat mode.
-- Teach all five allowed pink category labels once: select the category in Seal Vision, hover an inventory item in Moonlight, press F6. Relearn after changing stream resolution or game UI scale. This uses the category text, not item names or icon colors.
-- The Sell Items button runs `/elim`, verifies it in the bottom chat input, locates the green Street Merchant name, opens Trade, scans the first unlocked inventory tab (8 columns × 5 rows), and sells only learned categories. It checks the sale phrase and O/X layout and clicks O only. Unknown items are skipped.
-- If the merchant is not visible, search alternates bounded upper-left ground clicks with right-drag camera turns. F9 stops. Focus loss, unknown dialogs, timeouts or missing visual evidence stop the sequence. The app does not resume combat or walk back to the hunting area after selling.
-- Use English keyboard layout on both computers. A failed command is retried by clicking chat; unverified text is never submitted.
-- Faster scanning: approximately 250 ms initial tooltip wait and 120 ms verification, plus capture/matching/network latency. No fixed long wait for each confirmed sale.
+Live status: mouse movement was verified with a short held click; all five category samples were learned locally. The complete warp-to-sale sequence has not completed successfully, and no items have been sold. The latest NPC-exit fix was tested against the supplied image; live control was stopped with Escape before retesting it.
 
-Validation: visual anchors, tooltip selection, negative/blank-image rejection, manifest integrity and controller simulation checked locally against supplied screenshots. Live Moonlight selling/navigation has not been verified. First use requires game-area calibration and five category samples. The program does not learn arbitrary maps or guarantee a route around obstacles. Do not use on valuable inventory until live recognition has been checked.
+The scan covers only the first unlocked inventory page (8 columns x 5 rows); it stops after selling and does not return to hunting. Navigation is bounded visual search, not a learned map or obstacle-aware pathfinder.
 
-Only runtime modules and version.json are included. No addresses, user settings, full screenshots, accounts, inventory records or logs are published.
+Only runtime modules and version.json are released. Full screenshots, accounts, addresses, inventory records, local nameplate/category samples and logs are excluded.

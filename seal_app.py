@@ -1,4 +1,4 @@
-"""One-click Seal helper for the user's full-screen AnyDesk layout."""
+"""Foreground visual Seal helper with a Moonlight client and stable ZIP updates."""
 import ctypes
 from ctypes import wintypes
 import os,sys,json,time,re,hashlib,zipfile,threading,queue,io,subprocess
@@ -26,6 +26,27 @@ u.SetForegroundWindow.argtypes=[wintypes.HWND]
 u.GetClientRect.argtypes=[wintypes.HWND,ctypes.POINTER(wintypes.RECT)]
 u.ClientToScreen.argtypes=[wintypes.HWND,ctypes.POINTER(wintypes.POINT)]
 u.GetWindowThreadProcessId.argtypes=[wintypes.HWND,ctypes.POINTER(wintypes.DWORD)]
+
+class _KeyboardInput(ctypes.Structure):
+    _fields_=[('vk',wintypes.WORD),('scan',wintypes.WORD),('flags',wintypes.DWORD),('time',wintypes.DWORD),('extra',ctypes.c_void_p)]
+
+class _MouseInput(ctypes.Structure):
+    _fields_=[('dx',wintypes.LONG),('dy',wintypes.LONG),('data',wintypes.DWORD),('flags',wintypes.DWORD),('time',wintypes.DWORD),('extra',ctypes.c_void_p)]
+
+class _InputUnion(ctypes.Union):
+    _fields_=[('keyboard',_KeyboardInput),('mouse',_MouseInput)]
+
+class _Input(ctypes.Structure):
+    _fields_=[('kind',wintypes.DWORD),('value',_InputUnion)]
+
+u.SendInput.argtypes=[wintypes.UINT,ctypes.POINTER(_Input),ctypes.c_int]
+u.SendInput.restype=wintypes.UINT
+
+def send_scan_key(code,release=False):
+    scan=u.MapVirtualKeyW(code,0)
+    event=_Input();event.kind=1
+    event.value.keyboard=_KeyboardInput(code,scan,0x2 if release else 0,0,None)
+    if u.SendInput(1,ctypes.byref(event),ctypes.sizeof(event))!=1:raise OSError('ส่ง scan code เข้า Moonlight ไม่สำเร็จ')
 
 def find_anydesk():
     found=[]
@@ -64,7 +85,7 @@ def recognize_ap(engine,rgb):
     valid=[value for value,count in votes.items() if count>=2]
     return valid[0] if len(valid)==1 else None
 
-VERSION='1.7.1'
+VERSION='1.7.3'
 def stage_update(blob,home=ROOT):
     if len(blob)>5_000_000:raise ValueError('ไฟล์อัปเดตใหญ่เกินกำหนด')
     with zipfile.ZipFile(io.BytesIO(blob)) as z:
@@ -455,7 +476,7 @@ class App:
     def close(self):
         self.running=False;self.arming=False;self.reader.closed=True;self.reader.event.set();self.root.destroy()
 
-from vision_tracker import SaleVision, SALE_CATEGORIES, label_similarity
+from vision_tracker import SaleVision, SALE_CATEGORIES, label_similarity, chat_caret_visible, green_name_regions
 
 
 class TextReader:
@@ -467,7 +488,7 @@ class TextReader:
     def work(self):
         try:
             from rapidocr_onnxruntime import RapidOCR
-            engine=RapidOCR(intra_op_num_threads=1,inter_op_num_threads=1,det_limit_type='max',det_limit_side_len=1280)
+            engine=RapidOCR(intra_op_num_threads=1,inter_op_num_threads=1,det_limit_type='max',det_limit_side_len=2048)
             self.ready=True
             self.trace={'phase':'idle'}
             while not self.closed:
@@ -475,9 +496,17 @@ class TextReader:
                 job=self.request;self.request=None
                 if job is None:continue
                 token,image=job
-                started=time.monotonic();self.trace={'phase':'running','token':token,'shape':list(image.shape)}
+                started=time.monotonic();self.trace={'phase':'running','token':token,'shape':len(image) if isinstance(image,list) else list(image.shape)}
                 try:
-                    lines,_=engine(cv2.cvtColor(image,cv2.COLOR_RGB2BGR))
+                    if isinstance(image,list):
+                        lines=[]
+                        for box,strip in image:
+                            # Seal can render world-space labels from their
+                            # back side after a camera turn. Read both faces.
+                            for sample in (strip,cv2.flip(strip,1)):
+                                read,_=engine(cv2.cvtColor(sample,cv2.COLOR_RGB2BGR),use_det=False,use_cls=False)
+                                for text,confidence in read or []:lines.append((box,text,confidence))
+                    else:lines,_=engine(cv2.cvtColor(image,cv2.COLOR_RGB2BGR))
                     self.result=(token,time.monotonic(),lines or [])
                 except Exception as error:self.error=str(error);self.result=(token,time.monotonic(),[])
                 self.trace={'phase':'idle','token':token,'elapsed':time.monotonic()-started,'lines':len(self.result[2]),'error':self.error}
@@ -516,7 +545,7 @@ class MoonlightApp(App):
         super().__init__()
         # Retain update controls, event logging, combat mode and stable EXE.
         for widget in self.root.winfo_children():widget.destroy()
-        self.root.title('Seal Vision '+VERSION+' • Moonlight');self.root.geometry('720x880')
+        self.root.title('Seal Vision '+VERSION+' • Moonlight');self.root.geometry('720x930')
         self.text_reader=TextReader();self.sale_vision=SaleVision(ROOT)
         self.mode=tk.StringVar(value='ต่อสู้ / เก็บของ');self.teach=tk.StringVar(value=SALE_CATEGORIES[0])
         self.sale=None;self.text_token=0;self.text_at=0;self.text_state=None;self.text_seen=-1
@@ -535,6 +564,7 @@ class MoonlightApp(App):
         tk.OptionMenu(self.root,self.teach,*SALE_CATEGORIES).pack()
         tk.Label(self.root,text='เลือกหมวดด้านบนก่อนกด F6 • จำจากข้อความชมพู ไม่ใช่ชื่อหรือรูปไอเทม').pack()
         self.learned=tk.StringVar();tk.Label(self.root,textvariable=self.learned,wraplength=670).pack();self.update_learned()
+        tk.Label(self.root,text='F7: ชี้กลางป้ายชื่อ Street Merchant เพื่อจำภาพสด (กรณีภาพสตรีมต่างจากตัวอย่าง)').pack()
         tk.OptionMenu(self.root,self.mode,'ต่อสู้ / เก็บของ','กลับเมืองและขายของ').pack(pady=6)
         tk.Checkbutton(self.root,text='โหมดต่อสู้: ทดสอบ 3 รอบแล้วหยุด',variable=self.test).pack()
         tk.Button(self.root,text='เริ่มโหมดที่เลือก (F8)',command=self.start,bg='#b8e1c3',font=('Segoe UI',14,'bold')).pack(fill='x',padx=25,pady=5)
@@ -635,14 +665,21 @@ class MoonlightApp(App):
         vw,vh=u.GetSystemMetrics(78),u.GetSystemMetrics(79)
         u.mouse_event(0xC001,round((x+px-vx)*65535/max(1,vw-1)),round((y+py-vy)*65535/max(1,vh-1)),0,0)
         if not move:
+            time.sleep(.10)
+            if not self.allowed():return False
             down,up=(8,16) if right else (2,4)
-            u.mouse_event(down,0,0,0,0);u.mouse_event(up,0,0,0,0)
+            u.mouse_event(down,0,0,0,0)
+            try:time.sleep(.18)
+            finally:u.mouse_event(up,0,0,0,0)
         return True
 
     def key(self,code,now):
+        if u.GetAsyncKeyState(0x78)&0x8001:
+            self.stop();return False
         if not self.allowed():return False
-        scan=u.MapVirtualKeyW(code,0)
-        u.keybd_event(code,scan,0,0);time.sleep(.07);u.keybd_event(code,scan,2,0)
+        send_scan_key(code)
+        try:time.sleep(.07)
+        finally:send_scan_key(code,release=True)
         self.event('key',code=code,ap=self.ap)
         return True
 
@@ -652,6 +689,7 @@ class MoonlightApp(App):
         self.event('sale_state',state=state)
 
     def fail_sale(self,reason):
+        self.event('sale_stopped',reason=reason,ocr=getattr(self.text_reader,'trace',{}))
         sold=self.sale['sold'];self.stop();self.sale=None
         self.status.set(f'หยุดขาย: {reason} • ขายแล้ว {sold} ชิ้น')
 
@@ -660,6 +698,8 @@ class MoonlightApp(App):
         lines=None
         if result and result[0]==self.text_token and self.text_state==state and self.text_seen!=result[0]:
             lines=result[2];self.text_seen=result[0]
+            self.text_reader.result=None;self.text_state=None
+            return lines
         if (result is not None or self.text_state!=state) and now-self.text_at>.8:
             self.text_token+=1;self.text_at=now;self.text_state=state;self.text_reader.result=None
             self.text_reader.submit(self.text_token,image)
@@ -675,12 +715,31 @@ class MoonlightApp(App):
         try:self.sale_vision.learn(self.teach.get(),self.sale_vision.tooltip(image,slot));self.update_learned();self.status.set('จำหมวด '+self.teach.get()+' แล้ว')
         except Exception as error:self.status.set(str(error))
 
+    def teach_merchant(self):
+        if self.running:self.status.set('หยุด F9 ก่อนจำป้ายแม่ค้า');return
+        found=moonlight_window()
+        if not found or u.GetForegroundWindow()!=found[1]:return
+        self.target_hwnd=found[1];image=self.capture();p=wintypes.POINT();u.GetCursorPos(ctypes.byref(p))
+        px,py=p.x-self.game_rect[0],p.y-self.game_rect[1]
+        rows=green_name_regions(image)
+        nearby=[box for box,_ in rows if box[0][0]<=px<=box[1][0] and box[0][1]-8<=py<=box[2][1]+8]
+        if not nearby:self.status.set('ชี้กลางข้อความชื่อ Street Merchant ให้ชัดแล้วกด F7');return
+        box=min(nearby,key=lambda b:abs((b[0][1]+b[2][1])/2-py))
+        x,y=box[0];x2,y2=box[2];sample=image[y:y2,x:x2].copy()
+        if not 50<=sample.shape[1]<=500:self.status.set('ป้ายชื่อไม่ครบ ลองชี้กลางชื่อใหม่');return
+        Image.fromarray(sample).save(ROOT/'merchant_label.png')
+        self.sale_vision.templates['merchant_name']=sample
+        self.status.set('จำภาพป้าย Street Merchant จากสตรีมนี้แล้ว');self.event('merchant_label_learned',size=list(sample.shape))
+
     def tick(self):
         # App.tick supplies update handling and F8/F9; add F6 edge detection.
         if hasattr(self,'sale_vision'):
             value=u.GetAsyncKeyState(0x75);held=bool(value&0x8000)
             if (value&1) or (held and not self.hotkeys.get(0x75)):self.teach_label()
             self.hotkeys[0x75]=held
+            value=u.GetAsyncKeyState(0x76);held=bool(value&0x8000)
+            if (value&1) or (held and not self.hotkeys.get(0x76)):self.teach_merchant()
+            self.hotkeys[0x76]=held
         super().tick()
 
     def step(self):
@@ -703,24 +762,74 @@ class MoonlightApp(App):
         if now-s['started']>600:self.fail_sale('ครบเวลาค้นหา/ขาย 10 นาที');return
         if elapsed>40:self.fail_sale('รอภาพยืนยันขั้นตอน '+state+' เกินเวลา');return
         if state=='validate_game':
-            if self.sale_vision.find(image,'hud_ap',.83):self.transition('chat')
+            if self.sale_vision.find(image,'hud_ap',.83):self.transition('close_npc')
             elif elapsed>4:self.fail_sale('ไม่พบ HUD ของ Seal ตรวจกรอบภาพเกมและเปิดสตรีม')
             return
-        if state=='chat':
-            self.click_game((w*.13,h*.994))
-            if s['attempt']:
-                self.key(13,now)
-            self.transition('type');return
+        if state=='close_npc':
+            trade=self.sale_vision.find(image,'trade',.84)
+            exit_button=self.sale_vision.find(image,'npc_exit',.88)
+            if trade and exit_button:
+                scale=trade['scale']
+                dx=exit_button['x']-trade['x'];dy=exit_button['y']-trade['y']
+                if 45*scale<dx<160*scale and 20*scale<dy<150*scale:
+                    s['hits']=s.get('hits',0)+1
+                    if s['hits']>=2:
+                        self.click_game((exit_button['x']+exit_button['w']/2,exit_button['y']+exit_button['h']/2))
+                        self.transition('npc_closed')
+                    return
+            if trade:
+                if elapsed>4:self.fail_sale('พบเมนู NPC แต่ยังยืนยันปุ่มออกไม่ได้')
+                return
+            self.transition('focus_game');return
+        if state=='npc_closed':
+            if not self.sale_vision.find(image,'trade',.84):
+                s['hits']=s.get('hits',0)+1
+                if s['hits']>=2:self.transition('focus_game')
+            elif elapsed>4:self.fail_sale('เมนู NPC ยังไม่ปิดหลังคลิกปุ่มออก')
+            return
+        if state in ('focus_game','chat'):
+            self.click_game((w*.13,h*.994));self.transition('open_chat');return
+        if state=='open_chat' and elapsed>.35:
+            self.click_game((w*.13,h*.994));self.transition('chat_clicked');return
+        if state=='chat_ready':
+            if chat_caret_visible(image):self.transition('type');return
+            if elapsed>3:
+                self.click_game((w*.13,h*.994));self.transition('chat_clicked')
+            return
+        if state=='chat_clicked' and elapsed>.4:
+            if chat_caret_visible(image):self.transition('type')
+            elif elapsed>1.2:self.key(13,now);self.transition('chat_ready')
+            return
         if state=='type' and elapsed>.5:
+            # Focus and caret were verified; replace an old command instead of
+            # appending another /elim when a retry finds retained chat text.
+            # Seal's chat does not implement Ctrl+A. Backspace clears retained
+            # commands; this one-off warp preparation does not slow item sales.
+            for _ in range(32):
+                if not self.key(8,now):self.fail_sale('หน้าต่างเปลี่ยนขณะล้างช่องแชท');return
+            self.transition('verify_empty');return
+        if state=='verify_empty':
+            crop=cv2.resize(image[int(h*.976):,:int(w*.16)],None,fx=3,fy=3)
+            lines=self.ocr(crop,state)
+            if lines is None:return
+            text=''.join(str(line[1]).strip('._ ') for line in lines if line[2]>=.75)
+            if text:
+                if elapsed>3:self.fail_sale('ล้างแชทไม่สำเร็จ กรุณาคลิกช่องพิมพ์แชทก่อนเริ่ม')
+                return
             for code in (0xBF,ord('E'),ord('L'),ord('I'),ord('M')):
                 if not self.key(code,now):self.fail_sale('หน้าต่างเปลี่ยนขณะพิมพ์');return
             self.transition('verify_command');return
         if state=='verify_command':
-            lines=self.ocr(image[int(h*.96):,:int(w*.35)],state)
+            command_crop=image[int(h*.976):,:int(w*.16)]
+            command_crop=cv2.resize(command_crop,None,fx=3,fy=3,interpolation=cv2.INTER_CUBIC)
+            lines=self.ocr(command_crop,state)
             if self.text_reader.error:self.fail_sale('OCR: '+self.text_reader.error);return
             if lines is None:return
             text=' '.join(str(v[1]).lower().replace(' ','') for v in lines if v[2]>=.75)
-            if '/elim' in text:
+            self.event('command_ocr',text=text)
+            # OCR confuses the game's diagonal slash with f/y/v/apostrophe.
+            # Require a single full command, never a substring of duplicates.
+            if re.fullmatch(r"[/fyv']?elim[._]*",text):
                 self.key(13,now);self.transition('warp');return
             if elapsed>5:
                 # A retry only focuses an empty chat; never submit unverified text.
@@ -730,42 +839,57 @@ class MoonlightApp(App):
         if state=='warp' and elapsed>5:
             self.transition('merchant');return
         if state=='merchant':
-            lines=self.ocr(image,state)
-            if lines is None:return
-            matches=[line for line in lines if line[2]>=.83 and 'streetmerchant' in re.sub('[^a-z]','',line[1].lower())]
-            if len(matches)==1:
+            candidate=self.sale_vision.find(image,'merchant_name',0.)
+            if now-s.get('match_logged',0)>3:
+                self.event('merchant_match',match=candidate);s['match_logged']=now
+            threshold=.72 if (ROOT/'merchant_label.png').exists() else .79
+            name=candidate if candidate and candidate['score']>=threshold else None
+            if name:
                 s['hits']=s.get('hits',0)+1
-                if s['hits']<2:return
-                box=np.array(matches[0][0]);center=box.mean(axis=0);s['merchant_name']=center.tolist()
-                # Nameplate text must also be green, as in the supplied NPC.
-                x1,y1=box.min(axis=0).astype(int);x2,y2=box.max(axis=0).astype(int)
-                crop=image[max(0,y1):y2+1,max(0,x1):x2+1]
-                if not crop.size or ((crop[:,:,1]>crop[:,:,0]*1.15)&(crop[:,:,1]>crop[:,:,2]*1.1)).mean()<.025:return
-                self.click_game((center[0],center[1]+36*h/1050));self.transition('trade');return
-            if elapsed>3 and s['walks']<60:
-                # Bounded search in the user-specified upper-left direction.
-                # Search is bounded by 60 moves and the overall deadline.
-                if s['walks'] and s['walks']%3==0 and s.get('rotated_at')!=s['walks']:
-                    self.click_game((w*.53,h*.58),move=True)
-                    if not self.allowed():return
-                    u.mouse_event(8,0,0,0,0)
-                    try:u.mouse_event(1,95,0,0,0)
-                    finally:u.mouse_event(16,0,0,0,0)
-                    s['rotated_at']=s['walks'];self.transition('rotate_wait');return
-                point=(w*(.39 if s['walks']%2==0 else .44),h*.39)
-                if self.sale_vision.find(image,'shop') or self.sale_vision.grid(image):
-                    if self.sale_vision.grid(image):self.key(ord('I'),now);self.transition('merchant');return
+                if s['hits']>=2:
+                    if not self.sale_vision.find(image,'trade',.84):
+                        self.click_game((name['x']+name['w']/2,name['y']+name['h']/2+36*h/1050))
+                    self.transition('trade')
+                return
+            lines=self.ocr(green_name_regions(image),state)
+            if self.text_reader.error:self.fail_sale('OCR: '+self.text_reader.error);return
+            if lines is None:return
+            matches=[line for line in lines if line[2]>=.72 and 'streetmerchant' in re.sub('[^a-z]','',line[1].lower())]
+            matches=list({tuple(np.asarray(line[0]).ravel()):line for line in matches}.values())
+            self.event('merchant_names',count=len(lines),matched=[line[1] for line in matches])
+            if len(matches)==1:
+                box=np.asarray(matches[0][0]);center=box.mean(axis=0)
+                s['hits']=s.get('hits',0)+1
+                if s['hits']>=2:
+                    self.click_game((center[0],center[1]+36*h/1050));self.transition('trade')
+                return
+            if elapsed<.8:return
+            if self.sale_vision.grid(image):
+                self.key(ord('I'),now);self.transition('merchant');return
+            if s['walks']>=60:self.fail_sale('ไม่พบ Street Merchant หลังค้นหาครบกำหนด');return
+            # Inspect a full circle before walking away from the warp point.
+            turns=s.get('search_turns',0)
+            if turns<8:
+                self.click_game((w*.53,h*.58),move=True)
+                if not self.allowed():return
+                u.mouse_event(8,0,0,0,0)
+                try:
+                    time.sleep(.10);self.click_game((w*.59,h*.58),move=True);time.sleep(.12)
+                finally:u.mouse_event(16,0,0,0,0)
+                s['search_turns']=turns+1;self.transition('rotate_wait');return
+            # Choose visible pavement in the requested upper-left direction.
+            for fx,fy in ((.39,.39),(.44,.39),(.35,.48),(.42,.52)):
+                point=(w*fx,h*fy)
                 patch=image[int(point[1])-10:int(point[1])+10,int(point[0])-10:int(point[0])+10]
                 hsv=cv2.cvtColor(patch,cv2.COLOR_RGB2HSV)
-                if ((hsv[:,:,0]>10)&(hsv[:,:,0]<40)&(hsv[:,:,1]<170)&(hsv[:,:,2]>80)).mean()<.75:self.fail_sale('พื้นทางค้นหาแม่ค้าไม่ชัดเจน');return
-                self.click_game(point);s['walks']+=1;self.transition('walk_wait');return
-            if elapsed>8 and s['walks']>=60:self.fail_sale('ไม่พบชื่อ Street Merchant หลังค้นหาครบกำหนด')
-            return
+                if ((hsv[:,:,0]>10)&(hsv[:,:,0]<40)&(hsv[:,:,1]<170)&(hsv[:,:,2]>80)).mean()>=.75:
+                    self.click_game(point);s['walks']+=1;s['search_turns']=0;self.transition('walk_wait');return
+            s['walks']+=1;s['search_turns']=0;self.transition('rotate_wait');return
         if state=='rotate_wait' and elapsed>1.5:self.transition('merchant');return
         if state=='walk_wait' and elapsed>2.5:self.transition('merchant');return
         if state=='trade':
             if self.sale_vision.find(image,'shop') and self.sale_vision.grid(image):self.transition('scan');return
-            anchor=self.sale_vision.find(image,'trade',.88)
+            anchor=self.sale_vision.find(image,'trade',.84)
             if anchor:
                 s['hits']=s.get('hits',0)+1
                 if s['hits']>=2:self.click_game((anchor['x']+anchor['w']/2,anchor['y']+anchor['h']/2));self.transition('shop')
@@ -890,6 +1014,8 @@ if __name__=='__main__':
         def sample_ocr():
             sample=np.zeros((100,700,3),np.uint8)
             cv2.putText(sample,'/elim',(20,65),cv2.FONT_HERSHEY_SIMPLEX,1.5,(255,255,255),2)
+            fixture=os.environ.get('SEAL_VISION_OCR_FIXTURE')
+            if fixture:sample=green_name_regions(np.asarray(Image.open(fixture).convert('RGB')))
             app.text_reader.submit(-1,sample)
         app.root.after(4000,sample_ocr)
         def diagnostic():
